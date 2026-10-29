@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stream Inspector</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd; --accent:#2f6fde; --bad:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --panel:#1f1f1d; --text:#ecebe6; --muted:#9a9993; --line:#33322f; --accent:#6d9cf0; --bad:#f08c5a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; }
+  .muted { color:var(--muted); }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 8px; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:4px 2px; border-bottom:1px solid var(--line); }
+  td.num { text-align:right; font-variant-numeric: tabular-nums; }
+  tr.sel td { color:var(--accent); }
+  tr { cursor:pointer; }
+  pre { margin:0; font:12px/1.4 ui-monospace, monospace; white-space:pre-wrap; word-break:break-all; max-height:60vh; overflow:auto; }
+  button, select, input { font:inherit; padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+  #incidents div { padding:3px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--bad); margin-right:6px; }
+  .dot.on { background:#3aa55d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stream Inspector</h1>
+  <span><span id="dot" class="dot"></span><span id="conn">connecting…</span></span>
+  <span class="muted">sim t = <span id="simt">0</span>s</span>
+  <div class="row" style="margin:0">
+    <label>speed <select id="speed"><option>0.25</option><option>0.5</option><option selected>1</option><option>2</option><option>5</option><option>10</option></select></label>
+    <button id="pause">Pause</button>
+  </div>
+</header>
+<main>
+  <div style="display:grid; gap:16px; align-content:start">
+    <section>
+      <h2>Streams (click to inspect)</h2>
+      <table id="streams"></table>
+    </section>
+    <section>
+      <h2>Trigger scenario</h2>
+      <div class="row">
+        <button data-c='{"stream":"metrics","action":"spike"}'>CPU spike</button>
+        <button data-c='{"stream":"ticker","action":"shock"}'>Market shock</button>
+        <button data-c='{"stream":"geo","action":"surge"}'>Geo surge</button>
+        <button data-c='{"stream":"fleet","action":"alert","count":100}'>Fleet alert</button>
+        <button data-c='{"stream":"network","action":"outage"}'>Network outage</button>
+        <button data-c='{"stream":"logs","action":"burst"}'>Error burst</button>
+      </div>
+    </section>
+    <section>
+      <h2>Incidents</h2>
+      <div id="incidents" class="muted">none yet</div>
+    </section>
+  </div>
+  <section>
+    <h2>Latest message: <span id="selName"></span></h2>
+    <pre id="latest"></pre>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {};       // per stream: count, windowCount, rate, gaps, lastSeq, last
+let selected = 'metrics';
+let ws;
+
+function render() {
+  $('streams').innerHTML = Object.entries(state).map(([name, s]) =>
+    `<tr data-s="${name}" class="${name === selected ? 'sel' : ''}">
+       <td>${name}</td><td class="num">${s.rate.toFixed(1)}/s</td>
+       <td class="num">seq ${s.lastSeq}</td><td class="num" title="sequence gaps (dropped)">${s.gaps} gaps</td></tr>`).join('');
+  const s = state[selected];
+  $('selName').textContent = selected;
+  if (s && s.last) {
+    let shown = s.last;
+    if (selected === 'fleet') {
+      // Columnar arrays are huge; show only the first few entries
+      const d = s.last.data;
+      shown = { ...s.last, data: Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Array.isArray(v) ? [...v.slice(0, 5), `… ${v.length - 5} more`] : v])) };
+    }
+    $('latest').textContent = JSON.stringify(shown, null, 2);
+  }
+}
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    $('dot').classList.add('on'); $('conn').textContent = 'connected';
+    ws.send(JSON.stringify({ type: 'subscribe', streams: ['*'] }));
+  };
+  ws.onclose = () => { $('dot').classList.remove('on'); $('conn').textContent = 'disconnected, retrying…'; setTimeout(connect, 1500); };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'welcome') {
+      msg.streams.forEach((n) => state[n] ??= { count: 0, windowCount: 0, rate: 0, gaps: 0, lastSeq: 0, last: null });
+      $('speed').value = String(msg.speed);
+      return;
+    }
+    if (msg.type !== 'data') return;
+    const s = state[msg.stream];
+    if (s.lastSeq && msg.seq > s.lastSeq + 1) s.gaps += msg.seq - s.lastSeq - 1;
+    s.lastSeq = msg.seq; s.count++; s.windowCount++; s.last = msg;
+    $('simt').textContent = msg.t.toFixed(1);
+    if (msg.stream === 'incidents') {
+      const el = $('incidents');
+      if (el.classList.contains('muted')) { el.classList.remove('muted'); el.innerHTML = ''; }
+      el.insertAdjacentHTML('afterbegin', `<div><span class="muted">${new Date(msg.ts).toLocaleTimeString()} · ${msg.data.source}</span> ${msg.data.summary}</div>`);
+    }
+  };
+}
+
+setInterval(() => { for (const s of Object.values(state)) { s.rate = s.windowCount; s.windowCount = 0; } }, 1000);
+setInterval(render, 250);
+
+const control = (cmd) => fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cmd) });
+$('streams').onclick = (e) => { const tr = e.target.closest('tr'); if (tr) { selected = tr.dataset.s; render(); } };
+document.querySelectorAll('[data-c]').forEach((b) => b.onclick = () => control(JSON.parse(b.dataset.c)));
+$('speed').onchange = () => control({ action: 'speed', value: Number($('speed').value) });
+let paused = false;
+$('pause').onclick = () => { paused = !paused; control({ action: paused ? 'pause' : 'resume' }); $('pause').textContent = paused ? 'Resume' : 'Pause'; };
+connect();
+</script>
+</body>
+</html>
