@@ -2,16 +2,32 @@
 // offset so charts can scroll on a smooth local clock.
 
 export function monotonicEpochNow() {
-  // TODO: performance.timeOrigin + performance.now(): it never jumps, and it's comparable across worker/main
+  return performance.timeOrigin + performance.now() // it never jumps, and it's comparable across worker/main
 }
 
 export class ClockSync {
+  private readonly maxDriftMsPerSec: number;
+  private estimate:number | null = null;
+  private prevArrivalTime: number = 0;
+  constructor({maxDriftMsPerSec}:{maxDriftMsPerSec: number}){
+    this.maxDriftMsPerSec = maxDriftMsPerSec;
+  }
   observe(serverTs: number, localArrival: number) {
-    // TODO: each sample = arrival - serverTs = true offset + network delay
-    // TODO: keep the minimum (least-delayed) sample, but let it creep up slowly to follow drift
+    const sample = localArrival - serverTs;
+    if(this.estimate === null){
+      this.estimate = sample;
+      this.prevArrivalTime = localArrival;
+      return;
+    }
+    const secondsSinceLast = (localArrival - this.prevArrivalTime) / 1000;
+    const creep = this.estimate + (this.maxDriftMsPerSec * secondsSinceLast);
+    this.estimate = Math.min(sample,creep);
+    this.prevArrivalTime = localArrival;
+   
   }
 
   get offset() {
-    // TODO: return the current estimate (or null before the first sample)
+    return this.estimate;
+    
   }
 }
